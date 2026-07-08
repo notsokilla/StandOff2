@@ -157,7 +157,14 @@ async def handle_prize(callback: types.CallbackQuery):
     await db.mark_prize_clicked(user_id)
     
     try:
-        photo = FSInputFile(r"data\photos\golf.jpg")
+        # ✅ Используем forward slashes для Linux и pathlib для кроссплатформенности
+        from pathlib import Path
+        photo_path = Path("data/photos/golf.jpg")
+        
+        if not photo_path.exists():
+            raise FileNotFoundError(f"Фото не найдено: {photo_path}")
+        
+        photo = FSInputFile(str(photo_path))
         await callback.message.answer_photo(
             photo=photo,
             caption="🎁 **2500 ГОЛДЫ ЗА 11 РУБЛЕЙ**\n\n"
@@ -167,7 +174,9 @@ async def handle_prize(callback: types.CallbackQuery):
                     "⏰ Время действия предложения всего 6 часов с момента получения этого сообщения ⏰",
             parse_mode="Markdown"
         )
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        logging.warning(f"⚠️ Фото не найдено: {e}")
+        # Отправляем только текст если фото нет
         await callback.message.answer(
             "🎁 **2500 ГОЛДЫ ЗА 11 РУБЛЕЙ**\n\n"
             "Забирай свою голду 🎁\n\n"
@@ -176,9 +185,15 @@ async def handle_prize(callback: types.CallbackQuery):
             "⏰ Время действия предложения всего 6 часов с момента получения этого сообщения ⏰",
             parse_mode="Markdown"
         )
+    except Exception as e:
+        logging.error(f"❌ Ошибка при отправке ПРИЗа: {e}")
+        await callback.message.answer(
+            "🎁 **2500 ГОЛДЫ ЗА 11 РУБЛЕЙ**\n\n"
+            "🔗 Забирай их [здесь](https://clicktosite.ru/fRxvPK)",
+            parse_mode="Markdown"
+        )
     
     await callback.answer()
-
 
 @dp.callback_query(F.data.startswith("answer_"))
 async def handle_answer(callback: types.CallbackQuery, state: FSMContext):
