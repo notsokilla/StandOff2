@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import re
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -17,7 +16,7 @@ from keyboards import (
 from data.maps_data import QUIZ_QUESTIONS, MAPS_DATA
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ========== НАСТРОЙКА ПРОКСИ ==========
 def get_session():
@@ -31,35 +30,12 @@ def get_session():
     logging.info(f"🔄 Настраивается прокси: {proxy_url}")
     
     try:
-        from aiohttp_socks import ProxyConnector
-        
-        # Парсим URL прокси: socks5://user:pass@ip:port или socks5://ip:port
-        match = re.match(
-            r'socks5://(?:(?P<user>[^:]+):(?P<pass>[^@]+)@)?(?P<host>[^:]+):(?P<port>\d+)',
-            proxy_url
-        )
-        
-        if not match:
-            logging.error(f"❌ Неверный формат прокси: {proxy_url}")
-            return AiohttpSession()
-        
-        connector = ProxyConnector(
-            host=match.group('host'),
-            port=int(match.group('port')),
-            username=match.group('user') or None,
-            password=match.group('pass') or None,
-            rdns=True  # ВАЖНО: DNS резолвится через прокси (обходит блокировки!)
-        )
-        
-        logging.info(f"✅ Прокси настроен: {match.group('host')}:{match.group('port')}")
-        return AiohttpSession(connector=connector)
-        
-    except ImportError:
-        logging.error("❌ Модуль aiohttp-socks не установлен!")
-        logging.error("❌ Добавьте в requirements.txt: aiohttp-socks>=0.8.0")
-        return AiohttpSession()
+        # aiogram 3.x поддерживает proxy параметр напрямую
+        # Формат: socks5://username:password@ip:port
+        return AiohttpSession(proxy=proxy_url)
     except Exception as e:
         logging.error(f"❌ Ошибка настройки прокси: {e}")
+        logging.warning("⚠️ Пробуем запустить без прокси")
         return AiohttpSession()
 
 # Инициализация
@@ -433,7 +409,7 @@ async def main():
         logging.error("💡 Проверьте токен и PROXY_URL в .env")
         return
     
-    logging.info("Запуск бота...")
+    logging.info("🚀 Запуск polling...")
     await dp.start_polling(bot)
 
 
