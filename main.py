@@ -1,11 +1,13 @@
 import asyncio
-from aiogram.exceptions import TelegramForbiddenError
 import logging
+import os
+import re
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import FSInputFile
+from aiogram.client.session.aiohttp import AiohttpSession
 from config import BOT_TOKEN, ADMIN_PASSWORD
 from database import Database
 from keyboards import (
@@ -17,8 +19,51 @@ from data.maps_data import QUIZ_QUESTIONS, MAPS_DATA
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
+# ========== НАСТРОЙКА ПРОКСИ ==========
+def get_session():
+    """Создаёт сессию с прокси если он указан"""
+    proxy_url = os.getenv("PROXY_URL", "").strip()
+    
+    if not proxy_url:
+        logging.warning("⚠️ Прокси не настроен! Если бот не работает - добавьте PROXY_URL в .env")
+        return AiohttpSession()
+    
+    logging.info(f"🔄 Настраивается прокси: {proxy_url}")
+    
+    try:
+        from aiohttp_socks import ProxyConnector
+        
+        # Парсим URL прокси: socks5://user:pass@ip:port или socks5://ip:port
+        match = re.match(
+            r'socks5://(?:(?P<user>[^:]+):(?P<pass>[^@]+)@)?(?P<host>[^:]+):(?P<port>\d+)',
+            proxy_url
+        )
+        
+        if not match:
+            logging.error(f"❌ Неверный формат прокси: {proxy_url}")
+            return AiohttpSession()
+        
+        connector = ProxyConnector(
+            host=match.group('host'),
+            port=int(match.group('port')),
+            username=match.group('user') or None,
+            password=match.group('pass') or None,
+            rdns=True  # ВАЖНО: DNS резолвится через прокси (обходит блокировки!)
+        )
+        
+        logging.info(f"✅ Прокси настроен: {match.group('host')}:{match.group('port')}")
+        return AiohttpSession(connector=connector)
+        
+    except ImportError:
+        logging.error("❌ Модуль aiohttp-socks не установлен!")
+        logging.error("❌ Добавьте в requirements.txt: aiohttp-socks>=0.8.0")
+        return AiohttpSession()
+    except Exception as e:
+        logging.error(f"❌ Ошибка настройки прокси: {e}")
+        return AiohttpSession()
+
 # Инициализация
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN, session=get_session())
 dp = Dispatcher()
 db = Database()
 
@@ -34,7 +79,7 @@ class AdminState(StatesGroup):
 
 # Хранилище текущего вопроса для каждого пользователя
 user_current_question = {}
-user_scores = {}  # Хранилище баллов пользователя
+user_scores = {}
 
 
 # ========== ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЕЙ ==========
@@ -42,7 +87,6 @@ user_scores = {}  # Хранилище баллов пользователя
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     """Обработчик команды /start"""
-    # Записываем пользователя в БД
     await db.add_user(
         user_id=message.from_user.id,
         username=message.from_user.username or "",
@@ -80,7 +124,6 @@ async def show_question(user_id: int, chat_id: int, question_index: int):
     question = QUIZ_QUESTIONS[question_index]
     map_data = MAPS_DATA[question['map_key']]
     
-    # Отправляем фото карты
     try:
         photo = FSInputFile(question['photo_path'])
         await bot.send_photo(
@@ -101,7 +144,6 @@ async def show_question(user_id: int, chat_id: int, question_index: int):
             text=f"🤔 {question_index + 1}. Как называется эта карта?"
         )
     
-    # Отправляем клавиатуру с вариантами ответов
     await bot.send_message(
         chat_id=chat_id,
         text="Выберите правильный ответ:",
@@ -126,7 +168,6 @@ async def finish_quiz(user_id: int, chat_id: int):
         reply_markup=get_prize_keyboard()
     )
     
-    # Очистка
     if user_id in user_current_question:
         del user_current_question[user_id]
     if user_id in user_scores:
@@ -140,8 +181,7 @@ async def handle_prize(callback: types.CallbackQuery):
     await db.mark_prize_clicked(user_id)
     
     try:
-        # Используем FSInputFile для локального файла
-        photo = FSInputFile(r"data\photos\golf.jpg")  # Raw string для избежания escape sequence
+        photo = FSInputFile(r"data\photos\golf.jpg")
         await callback.message.answer_photo(
             photo=photo,
             caption="🎁 **2500 ГОЛДЫ ЗА 11 РУБЛЕЙ**\n\n"
@@ -152,7 +192,6 @@ async def handle_prize(callback: types.CallbackQuery):
             parse_mode="Markdown"
         )
     except FileNotFoundError:
-        # Если фото нет, отправляем просто текст
         await callback.message.answer(
             "🎁 **2500 ГОЛДЫ ЗА 11 РУБЛЕЙ**\n\n"
             "Забирай свою голду 🎁\n\n"
@@ -183,24 +222,17 @@ async def handle_answer(callback: types.CallbackQuery, state: FSMContext):
     
     try:
         if answer == correct_answer:
-            # Правильный ответ
             user_scores[user_id] = user_scores.get(user_id, 0) + 1
             await callback.message.answer("Правильно! 🔥")
         else:
-            # Неправильный ответ
-            await callback.message.answer(
-                "К сожалению, это неправильный ответ."
-            )
+            await callback.message.answer("К сожалению, это неправильный ответ.")
             await callback.message.answer(
                 f"Название карты - {correct_answer} ✅\n\n"
                 f"{map_data['description']}"
             )
         
-        # Переход к следующему вопросу
         user_current_question[user_id] = current_question + 1
         await callback.answer()
-        
-        # Небольшая задержка перед следующим вопросом
         await asyncio.sleep(1)
         await show_question(user_id, chat_id, current_question + 1)
         
@@ -259,10 +291,8 @@ async def admin_users(callback: types.CallbackQuery):
         await callback.answer()
         return
     
-    # Группируем по user_id, берем последний результат
     unique_users = {}
     for user_id, username, first_name, last_name, score, completed_at, clicked_prize in results:
-        # Сохраняем последнюю запись для каждого пользователя
         unique_users[user_id] = (user_id, username, first_name, last_name, score, completed_at, clicked_prize)
     
     message_text = "👥 **Пользователи, прошедшие тест:**\n\n"
@@ -314,12 +344,10 @@ async def cancel_broadcast(message: types.Message, state: FSMContext):
 async def process_broadcast_text(message: types.Message, state: FSMContext):
     """Обработка текста рассылки"""
     text = message.text
-    
     if not text:
         await message.answer("⚠️ Сообщение не может быть пустым!")
         return
     
-    # Сохраняем текст во временное хранилище
     await state.update_data(broadcast_text=text)
     await state.set_state(AdminState.waiting_for_broadcast_photo)
     
@@ -338,17 +366,10 @@ async def process_broadcast_photo_only(message: types.Message, state: FSMContext
 @dp.message(AdminState.waiting_for_broadcast_photo, F.photo)
 async def process_broadcast_photo(message: types.Message, state: FSMContext):
     """Обработка фото и отправка рассылки"""
-    # Получаем текст из состояния
     state_data = await state.get_data()
     text = state_data.get("broadcast_text", "")
-    
-    # Получаем caption если есть
     caption = message.caption or ""
-    
-    # Объединяем текст и caption
     full_text = f"{text}\n\n{caption}".strip() if caption else text
-    
-    # Получаем фото (берем лучшее качество)
     photo_file_id = message.photo[-1].file_id
     
     await send_broadcast(message, full_text, photo_file_id, state)
@@ -359,13 +380,11 @@ async def process_broadcast_no_photo(message: types.Message, state: FSMContext):
     """Отправка рассылки без фото"""
     state_data = await state.get_data()
     text = state_data.get("broadcast_text", "")
-    
     await send_broadcast(message, text, None, state)
 
 
 async def send_broadcast(message: types.Message, text: str, photo_file_id: str | None, state: FSMContext):
     """Функция отправки рассылки"""
-    # Получаем всех пользователей
     users = await db.get_all_users_for_broadcast()
     
     if not users:
@@ -381,20 +400,11 @@ async def send_broadcast(message: types.Message, text: str, photo_file_id: str |
     for user_id, username in users:
         try:
             if photo_file_id:
-                # Отправляем с фото
-                await bot.send_photo(
-                    chat_id=user_id,
-                    photo=photo_file_id,
-                    caption=text
-                )
+                await bot.send_photo(chat_id=user_id, photo=photo_file_id, caption=text)
             else:
-                # Отправляем только текст
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=text
-                )
+                await bot.send_message(chat_id=user_id, text=text)
             success_count += 1
-            await asyncio.sleep(0.05)  # Небольшая задержка чтобы не получить бан
+            await asyncio.sleep(0.05)
         except Exception as e:
             error_count += 1
             logging.warning(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
@@ -409,67 +419,19 @@ async def send_broadcast(message: types.Message, text: str, photo_file_id: str |
     )
 
 
-@dp.message(Command("cancel"), AdminState.waiting_for_broadcast_text)
-async def cancel_broadcast(message: types.Message, state: FSMContext):
-    """Отмена рассылки"""
-    await state.clear()
-    await message.answer("❌ Рассылка отменена.")
-
-
-@dp.message(AdminState.waiting_for_broadcast_text)
-async def process_broadcast(message: types.Message, state: FSMContext):
-    """Обработка и отправка рассылки"""
-    text = message.text
-    
-    if not text:
-        await message.answer("⚠️ Сообщение не может быть пустым!")
-        return
-    
-    # Получаем всех пользователей
-    users = await db.get_all_users_for_broadcast()
-    
-    if not users:
-        await message.answer("📭 Нет пользователей для рассылки!")
-        await state.clear()
-        return
-    
-    await message.answer(f"🚀 Начинаю рассылку для {len(users)} пользователей...")
-    
-    success_count = 0
-    error_count = 0
-    
-    for user_id, username in users:
-        try:
-            username_str = f"@{username}" if username else ""
-            await bot.send_message(
-                chat_id=user_id,
-                text=f"{text}\n\n— {username_str}" if username_str else text
-            )
-            success_count += 1
-            await asyncio.sleep(0.05)  # Небольшая задержка чтобы не получить бан
-        except Exception as e:
-            error_count += 1
-            logging.warning(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
-    
-    await state.clear()
-    await message.answer(
-        f"✅ Рассылка завершена!\n\n"
-        f"📤 Успешно отправлено: {success_count}\n"
-        f"❌ Ошибок: {error_count}\n"
-        f"👥 Всего пользователей: {len(users)}"
-    )
-
-
-# ========== ГЛОБАЛЬНАЯ ОБРАБОТКА ОШИБОК ==========
-
-
-
-
 # ========== ЗАПУСК БОТА ==========
 
 async def main():
-    # Инициализация БД
     await db.init_db()
+    
+    # Проверка подключения
+    try:
+        me = await bot.get_me()
+        logging.info(f"✅ Бот запущен: @{me.username}")
+    except Exception as e:
+        logging.error(f"❌ Не удалось подключиться к Telegram: {e}")
+        logging.error("💡 Проверьте токен и PROXY_URL в .env")
+        return
     
     logging.info("Запуск бота...")
     await dp.start_polling(bot)
