@@ -1,5 +1,5 @@
 import aiosqlite
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 class Database:
     def __init__(self):
@@ -10,7 +10,7 @@ class Database:
         async with aiosqlite.connect(self.db_path) as conn:
             cursor = await conn.cursor()
             
-            # Таблица пользователей (все кто нажал /start)
+            # Таблица пользователей
             await cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -33,10 +33,21 @@ class Database:
                 )
             ''')
             
+            # Таблица шаблонов рассылок
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS broadcast_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    photo_file_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             await conn.commit()
     
     async def add_user(self, user_id: int, username: str, first_name: str, last_name: str = None):
-        """Добавление/обновление пользователя (кто нажал /start)"""
+        """Добавление/обновление пользователя"""
         async with aiosqlite.connect(self.db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute('''
@@ -69,7 +80,7 @@ class Database:
             await conn.commit()
     
     async def get_all_results(self) -> List[Tuple]:
-        """Получение всех результатов с информацией о пользователях"""
+        """Получение всех результатов"""
         async with aiosqlite.connect(self.db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute('''
@@ -98,10 +109,52 @@ class Database:
             return total_users, total_tests, prize_clicks
     
     async def get_all_users_for_broadcast(self) -> List[Tuple[int, str]]:
-        """Получение всех пользователей для рассылки (user_id, username)"""
+        """Получение всех пользователей для рассылки"""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute('SELECT user_id, username FROM users')
+            return await cursor.fetchall()
+    
+    # ========== МЕТОДЫ ДЛЯ ШАБЛОНОВ ==========
+    
+    async def create_template(self, name: str, text: str, photo_file_id: str = None) -> int:
+        """Создание шаблона. Возвращает ID созданного шаблона"""
         async with aiosqlite.connect(self.db_path) as conn:
             cursor = await conn.cursor()
             await cursor.execute('''
-                SELECT user_id, username FROM users
+                INSERT INTO broadcast_templates (name, text, photo_file_id)
+                VALUES (?, ?, ?)
+            ''', (name, text, photo_file_id))
+            await conn.commit()
+            return cursor.lastrowid
+    
+    async def get_templates(self) -> List[Tuple]:
+        """Получение всех шаблонов"""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute('''
+                SELECT id, name, text, photo_file_id, created_at
+                FROM broadcast_templates
+                ORDER BY created_at DESC
             ''')
             return await cursor.fetchall()
+    
+    async def delete_template(self, template_id: int):
+        """Удаление шаблона"""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute('''
+                DELETE FROM broadcast_templates WHERE id = ?
+            ''', (template_id,))
+            await conn.commit()
+    
+    async def get_template_by_id(self, template_id: int) -> Optional[Tuple]:
+        """Получение шаблона по ID"""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute('''
+                SELECT id, name, text, photo_file_id, created_at
+                FROM broadcast_templates
+                WHERE id = ?
+            ''', (template_id,))
+            return await cursor.fetchone()
